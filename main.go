@@ -137,9 +137,14 @@ func (p *proxy) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func (p *proxy) ServeHTTP(w http.ResponseWriter, reqIn *http.Request) {
-	log.Info("<", reqIn.URL.Path, reqIn.URL.RawQuery)
+	log.WithFields(log.Fields{"method": reqIn.Method}).Info(reqIn.URL.String())
 	boundedPath := reqIn.URL.Path
 	start := time.Now()
+
+	now := time.Now()
+	nowHour := now.Truncate(1 * time.Hour)
+	oneHourAgo := now.Add(-1 * time.Hour)
+
 	defer func() {
 		requestCounter.WithLabelValues(reqIn.Method, boundedPath).Inc()
 		requestDuration.WithLabelValues(reqIn.Method, boundedPath).Observe(float64(time.Since(start)))
@@ -148,16 +153,25 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, reqIn *http.Request) {
 	case "/api/v1/series":
 		req := &http.Request{}
 		*req = *reqIn
+		req.URL.RawQuery = url.Values{
+			"start": []string{strconv.FormatInt(nowHour.Add(-1*time.Hour).Unix(), 10)},
+			"end":   []string{strconv.FormatInt(nowHour.Unix(), 10)},
+			"match": req.URL.Query()["match"],
+		}.Encode()
 		p.ReverseProxy.ServeHTTP(w, req)
 
 	case "/api/v1/label/__name__/values":
 		req := &http.Request{}
 		*req = *reqIn
+		req.URL.RawQuery = ""
 		p.ReverseProxy.ServeHTTP(w, req)
 
 	case "/api/v1/query":
 		req := &http.Request{}
 		*req = *reqIn
+		req.URL.RawQuery = url.Values{
+			"query": req.URL.Query()["query"],
+		}.Encode()
 		p.ReverseProxy.ServeHTTP(w, req)
 
 	case "/api/v1/query_range":
@@ -165,10 +179,6 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, reqIn *http.Request) {
 		*req = *reqIn // Copy request
 
 		params := req.URL.Query()
-		paramsNew := &url.Values{}
-
-		now := time.Now()
-		oneHourAgo := now.Add(-1 * time.Hour)
 
 		start, err := timeStr(params.Get("start"))
 		if err != nil {
@@ -210,22 +220,16 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, reqIn *http.Request) {
 			step = 15
 		}
 
-		paramsNew.Add("query", params.Get("query"))
-		paramsNew.Add("start", strconv.FormatInt(start.Truncate(p.ttl).Unix(), 10))
-		paramsNew.Add("end", strconv.FormatInt(end.Truncate(p.ttl).Unix(), 10))
-		paramsNew.Add("step", strconv.Itoa(step))
-		urlNew := &url.URL{
-			Scheme:   req.URL.Scheme,
-			Path:     req.URL.Path,
-			RawQuery: paramsNew.Encode(),
+		req.URL = &url.URL{
+			Scheme: req.URL.Scheme,
+			Path:   req.URL.Path,
+			RawQuery: url.Values{
+				"query": params["query"],
+				"start": []string{strconv.FormatInt(start.Truncate(p.ttl).Unix(), 10)},
+				"end":   []string{strconv.FormatInt(end.Truncate(p.ttl).Unix(), 10)},
+				"step":  []string{strconv.Itoa(step)},
+			}.Encode(),
 		}
-		req.URL = urlNew
-		log.WithFields(log.Fields{
-			"startOld":  params.Get("start"),
-			"startNew:": paramsNew.Get("start"),
-			"endOld:":   params.Get("end"),
-			"endNew:":   paramsNew.Get("end"),
-		}).Debug(">", req.URL.Path, req.URL.RawQuery)
 		p.ReverseProxy.ServeHTTP(w, req)
 
 	default:
