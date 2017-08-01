@@ -117,11 +117,11 @@ type proxy struct {
 func (p *proxy) RoundTrip(req *http.Request) (*http.Response, error) {
 	ci := p.cache.get(req)
 	if ci != nil {
-		log.Debug("	- cache hit")
+		log.Debug(" - cache hit")
 		hitCounter.WithLabelValues(req.Method, req.URL.Path).Inc() // Path is bounded by switch in serveHTTP
 		return http.ReadResponse(bufio.NewReader(bytes.NewBuffer(ci.content)), req)
 	}
-	log.Debug("	- cache miss")
+	log.Debug(" - cache miss")
 
 	resp, err := p.RoundTripper.RoundTrip(req)
 	if err != nil {
@@ -145,37 +145,36 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, reqIn *http.Request) {
 	nowHour := now.Truncate(1 * time.Hour)
 	oneHourAgo := now.Add(-1 * time.Hour)
 
+	req := &http.Request{}
 	defer func() {
 		requestCounter.WithLabelValues(reqIn.Method, boundedPath).Inc()
 		requestDuration.WithLabelValues(reqIn.Method, boundedPath).Observe(float64(time.Since(start)))
+
+		log.WithFields(log.Fields{"method": req.Method}).Debug(req.URL.String())
 	}()
 	switch reqIn.URL.Path {
 	case "/api/v1/series":
-		req := &http.Request{}
 		*req = *reqIn
 		req.URL.RawQuery = url.Values{
-			"start": []string{strconv.FormatInt(nowHour.Add(-1*time.Hour).Unix(), 10)},
-			"end":   []string{strconv.FormatInt(nowHour.Unix(), 10)},
-			"match": req.URL.Query()["match"],
+			"start":   []string{strconv.FormatInt(nowHour.Add(-1*time.Hour).Unix(), 10)},
+			"end":     []string{strconv.FormatInt(nowHour.Unix(), 10)},
+			"match[]": reqIn.URL.Query()["match[]"],
 		}.Encode()
 		p.ReverseProxy.ServeHTTP(w, req)
 
 	case "/api/v1/label/__name__/values":
-		req := &http.Request{}
 		*req = *reqIn
 		req.URL.RawQuery = ""
 		p.ReverseProxy.ServeHTTP(w, req)
 
 	case "/api/v1/query":
-		req := &http.Request{}
 		*req = *reqIn
 		req.URL.RawQuery = url.Values{
-			"query": req.URL.Query()["query"],
+			"query": reqIn.URL.Query()["query"],
 		}.Encode()
 		p.ReverseProxy.ServeHTTP(w, req)
 
 	case "/api/v1/query_range":
-		req := &http.Request{}
 		*req = *reqIn // Copy request
 
 		params := req.URL.Query()
@@ -250,14 +249,30 @@ func newProxy(promURL *url.URL, ttl time.Duration) *proxy {
 	return p
 }
 
+var (
+	logLevelMap = map[string]log.Level{
+		"debug": log.DebugLevel,
+		"info":  log.InfoLevel,
+		"warn":  log.WarnLevel,
+		"error": log.ErrorLevel,
+		"fatal": log.FatalLevel,
+		"panic": log.PanicLevel,
+	}
+)
+
 func main() {
 	var (
-		promAddr   = flag.String("-u", "http://localhost:9090", "URL of prometheus server")
-		listenAddr = flag.String("-l", "0.0.0.0:9191", "Address to listen on")
-		ttln       = flag.Int("-t", 60, "TTL")
+		promAddr   = flag.String("u", "http://localhost:9090", "URL of prometheus server")
+		listenAddr = flag.String("l", "0.0.0.0:9191", "Address to listen on")
+		ttln       = flag.Int("t", 60, "TTL")
+		logLevel   = flag.String("ll", "info", "Log level")
 	)
-
 	flag.Parse()
+	ll, ok := logLevelMap[*logLevel]
+	if !ok {
+		log.Fatal("Invalid log level (-ll) given:", *logLevel)
+	}
+	log.SetLevel(ll)
 	promURL, err := url.Parse(*promAddr)
 	if err != nil {
 		log.Fatal(err)
